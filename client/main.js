@@ -44,6 +44,7 @@ function render_tokens(context, tokens) {
 
     var line = "";
     var all_boxes = [];
+    var box_words = [];
     var save_boxes = function(y, boxes) {
         for (var i = 0; i < boxes.length; i++) {
             var box = [boxes[i][0], y - BOX_HEIGHT + 2 * BOX_BORDER_WIDTH, boxes[i][1] - boxes[i][0], BOX_HEIGHT];
@@ -70,12 +71,13 @@ function render_tokens(context, tokens) {
         if (tokens[i][0]) {
             // if it's a target word, add to boxes
             boxes.push(box);
+            box_words.push(tokens[i][1]);
         }
     }
     context.fillText(line, x, y);
     save_boxes(y, boxes);
     draw_boxes(all_boxes);
-    return all_boxes;
+    return [all_boxes, box_words];
 }
 
 function render_groups(context, groups) {
@@ -147,6 +149,7 @@ function add_event_listeners(canvas, state) {
     context.lineWidth = 2;
     context.strokeStyle = 'black';
     boxes = state.get()['boxes'];
+    box_words = state.get()['box_words'];
     var detect_box = function (x, y) {
         var intersect = function(box) {
             return (x >= box[0])
@@ -161,6 +164,9 @@ function add_event_listeners(canvas, state) {
         }
         return -1;
     }
+    var set_notification = function(s) {
+        $("#notification").text(s);
+    }
     var prev_pos = undefined;
     var prev_box = -1;
     canvas.addEventListener('mousedown', function(evt) {
@@ -170,6 +176,7 @@ function add_event_listeners(canvas, state) {
             context.moveTo(prev_pos.x, prev_pos.y);
             context.lineTo(cur_pos.x, cur_pos.y);
             context.stroke();
+            set_notification(box_words[prev_box] + ' -> ' + box_words[cur_box]);
             prev_pos = undefined;
             prev_box = -1;
         } else if (prev_box >= 0) {
@@ -178,6 +185,7 @@ function add_event_listeners(canvas, state) {
             prev_pos = cur_pos;
             prev_box = cur_box;
             cur_box = -1;
+            set_notification(box_words[prev_box]);
         }
     }, false);
 }
@@ -188,8 +196,13 @@ function render(state) {
     set_canvas();
     context = load_canvas();
     if (snapshot['mode'] !== 'matcher') {
-        boxes = render_tokens(context, snapshot['tokens'], tokens);
-        state.set($.extend(state.get(), {'boxes': boxes}));
+        result = render_tokens(context, snapshot['tokens'], tokens);
+        boxes = result[0];
+        box_words = result[1];
+        state.set($.extend(state.get(), {
+            'boxes': boxes,
+            'box_words': box_words,
+        }));
     } else {
         console.log('TODO');
         //render_groups(context, matcher);
@@ -233,3 +246,4 @@ Template.annotation_window.events({
         );
     },
 });
+

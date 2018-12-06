@@ -5,10 +5,14 @@
 <body>
   <h1>Coreference Annotator</h1>
 
+  {{> notification_window}}
   {{> annotation_window}}
 </body>
 
 <template name="annotation_window">
   <button>Start!</button>
   <canvas id="annotation_canvas"></canvas>
+</template>
+<template name="notification_window">
+  <p id="notification"></p>
 </template>

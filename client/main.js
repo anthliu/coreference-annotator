@@ -3,7 +3,6 @@ import { ReactiveVar } from 'meteor/reactive-var';
 
 import './main.html';
 import './util.js';
-import './data.js';
 
 function load_canvas() {
     var canvas = document.getElementById('annotation_canvas');
@@ -19,28 +18,6 @@ function set_canvas() {
     canvas.setAttribute('height', CANVAS_HEIGHT);
 }
 
-function text_to_entities(text) {
-    var tokens = text.split(/[ \n\t.,:]+/);
-    var entities = [];
-    for (var i = 0; i < tokens.length; i++) {
-        if (tokens[i] === "") {
-            continue;
-        }
-        if (tokens[i] === "[") {
-            ent = []
-            var j = i + 1;
-            for (; tokens[j] !== "]"; j++) {
-                ent.push(tokens[j]);
-            }
-            i = j;
-            entities.push([true, ent.join(' ')]);
-        } else {
-            entities.push([false, tokens[i]])
-        }
-    }
-    return entities;
-}
-
 function render_tokens(context, tokens) {
     var LINE_HEIGHT = 40;
     var MAX_WIDTH = Math.ceil(CANVAS_WIDTH * 0.9);
@@ -54,20 +31,27 @@ function render_tokens(context, tokens) {
     var measure_width = function(s) {
         return context.measureText(s).width;
     }
-    var draw_boxes = function(y, boxes) {
+    var draw_boxes = function(boxes) {
         context.save();
         context.lineWidth = BOX_BORDER_WIDTH;
         context.strokeStyle = 'black';
         for (var i = 0; i < boxes.length; i++) {
-            context.rect(boxes[i][0], y - BOX_HEIGHT + 2 * BOX_BORDER_WIDTH, boxes[i][1] - boxes[i][0], BOX_HEIGHT);
+            context.rect(boxes[i][0], boxes[i][1], boxes[i][2], boxes[i][3]);
             context.stroke();
         }
         context.restore();
     }
 
     var line = "";
-    var boxes = [];
+    var all_boxes = [];
+    var save_boxes = function(y, boxes) {
+        for (var i = 0; i < boxes.length; i++) {
+            var box = [boxes[i][0], y - BOX_HEIGHT + 2 * BOX_BORDER_WIDTH, boxes[i][1] - boxes[i][0], BOX_HEIGHT];
+            all_boxes.push(box);
+        }
+    }
 
+    var boxes = []
     for (var i = 0; i < tokens.length; i++) {
         var old_width = measure_width(line);
         var new_line = line + tokens[i][1] + ' ';
@@ -75,7 +59,7 @@ function render_tokens(context, tokens) {
         if (new_width > MAX_WIDTH && i > 0) {
             context.fillText(line, x, y);
             line = tokens[i][1] + ' ';
-            draw_boxes(y, boxes);
+            save_boxes(y, boxes);
             boxes = [];
             box = [x, x + measure_width(line)];
             y += LINE_HEIGHT;
@@ -89,7 +73,9 @@ function render_tokens(context, tokens) {
         }
     }
     context.fillText(line, x, y);
-    draw_boxes(y, boxes);
+    save_boxes(y, boxes);
+    draw_boxes(all_boxes);
+    return all_boxes;
 }
 
 function render_groups(context, groups) {
@@ -148,7 +134,7 @@ function render_groups(context, groups) {
     }
 }
 
-function add_event_listeners(canvas) {
+function add_event_listeners(canvas, state) {
     function getMousePos(canvas, evt) {
         var rect = canvas.getBoundingClientRect();
         return {
@@ -160,17 +146,39 @@ function add_event_listeners(canvas) {
     context = canvas.getContext('2d');
     context.lineWidth = 2;
     context.strokeStyle = 'black';
+    boxes = state.get()['boxes'];
+    var detect_box = function (x, y) {
+        var intersect = function(box) {
+            return (x >= box[0])
+                && (x <= box[0] + box[2])
+                && (y >= box[1])
+                && (y <= box[1] + box[3])
+        }
+        for (var i = 0; i < boxes.length; i++) {
+            if (intersect(boxes[i])) {
+                return i;
+            }
+        }
+        return -1;
+    }
     var prev_pos = undefined;
-    var made_click = false;
+    var prev_box = -1;
     canvas.addEventListener('mousedown', function(evt) {
         var cur_pos = getMousePos(canvas, evt);
-        if (made_click == true) {
+        var cur_box = detect_box(cur_pos.x, cur_pos.y);
+        if (prev_box >= 0 && cur_box >= 0) {
             context.moveTo(prev_pos.x, prev_pos.y);
             context.lineTo(cur_pos.x, cur_pos.y);
             context.stroke();
+            prev_pos = undefined;
+            prev_box = -1;
+        } else if (prev_box >= 0) {
+            return;
+        } else {
+            prev_pos = cur_pos;
+            prev_box = cur_box;
+            cur_box = -1;
         }
-        made_click = !made_click;
-        prev_pos = cur_pos;
     }, false);
 }
 
@@ -179,27 +187,26 @@ function render(state) {
 
     set_canvas();
     context = load_canvas();
-    if (snapshot['mode'] == 'baseline') {
-        console.log('baseline');
-        tokens = text_to_entities(segment1 + " " + segment2 + " " + segment3);
-        render_tokens(context, tokens);
-    } else if (snapshot['mode'] == 'segment') {
-        console.log('segment');
-        tokens = text_to_entities([segment1, segment2, segment3][parseInt(snapshot['segment']) - 1]);
-        render_tokens(context, tokens);
-    } else if (snapshot['mode'] == 'matcher') {
-        console.log('matcher');
-        tokens = text_to_entities("BOI");
-        render_groups(context, matcher);
+    if (snapshot['mode'] !== 'matcher') {
+        boxes = render_tokens(context, snapshot['tokens'], tokens);
+        state.set($.extend(state.get(), {'boxes': boxes}));
+    } else {
+        console.log('TODO');
+        //render_groups(context, matcher);
     }
+    //} else if (snapshot['mode'] == 'matcher') {
+    //    console.log('matcher');
+    //    tokens = text_to_entities("BOI");
+    //    render_groups(context, matcher);
+    //}
 }
 
 Template.annotation_window.onCreated(function annotationOnCreated() {
     // counter starts at 0
     this.counter = new ReactiveVar(0);
     this.state = new ReactiveVar({});
-    var result = getJsonFromUrl(getJsonFromUrl(window.location.href));
-    this.state.set($.extend(this.counter.get(), result))
+    var result = getJsonFromUrl(window.location.href);
+    this.state.set($.extend(this.state.get(), result))
 
     console.log(this.state.get());
 });
@@ -214,8 +221,15 @@ Template.annotation_window.events({
     'click button'(event, instance) {
         // increment the counter when button is clicked
         instance.counter.set(instance.counter.get() + 1);
-        render(instance.state);
-        var canvas = document.getElementById('annotation_canvas');
-        add_event_listeners(canvas);
+        tokens = Meteor.call(
+            'get_tokens', instance.state.get()['mode'], instance.state.get()['segment'],
+            function(err, tokens) {
+                instance.state.set($.extend(instance.state.get(), {'tokens': tokens}));
+                render(instance.state);
+
+                var canvas = document.getElementById('annotation_canvas');
+                add_event_listeners(canvas, instance.state);
+            }
+        );
     },
 });

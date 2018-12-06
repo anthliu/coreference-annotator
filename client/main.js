@@ -16,6 +16,7 @@ function set_canvas() {
     var canvas = document.getElementById('annotation_canvas');
     canvas.setAttribute('width', CANVAS_WIDTH);
     canvas.setAttribute('height', CANVAS_HEIGHT);
+    return canvas;
 }
 
 function render_tokens(context, tokens) {
@@ -80,7 +81,32 @@ function render_tokens(context, tokens) {
     return [all_boxes, box_words];
 }
 
-function render_groups(context, groups) {
+function matcher_refresh() {
+    Meteor.call(
+        'get_coref_groups',
+        function(err, res) {
+            group_ids = [];
+            groups = [];
+            for (var key in res['coref_groups']) {
+                box_group = res['coref_groups'][key];
+                box_group_words = [];
+                for (var i = 0; i < box_group.length; i++) {
+                    box_group_words.push(
+                        res['box_words'][box_group[i][0]][box_group[i][1]]
+                    )
+                }
+                group_ids.push(key);
+                groups.push(box_group_words);
+            }
+            render_groups(group_ids, groups);
+        }
+    );
+}
+
+function render_groups(group_ids, groups) {
+    var canvas = set_canvas();
+    context = load_canvas();
+
     var LINE_HEIGHT = 20;
     var MAX_WIDTH = Math.ceil(CANVAS_WIDTH * 0.9);
     var PADDING = 15;
@@ -100,6 +126,7 @@ function render_groups(context, groups) {
         }
         return [max_width, LINE_HEIGHT * group.length];
     }
+    var all_boxes = [];
     var draw_group = function(x, y, group) {
         var y_0 = y;
         max_width = 0;
@@ -111,6 +138,7 @@ function render_groups(context, groups) {
             y += LINE_HEIGHT;
         }
         context.rect(x, y_0 - LINE_HEIGHT, max_width, y - y_0 + LINE_HEIGHT/3);
+        all_boxes.push([x, y_0 - LINE_HEIGHT, max_width, y - y_0 + LINE_HEIGHT/3]);
         context.stroke();
     }
 
@@ -122,18 +150,84 @@ function render_groups(context, groups) {
     var y_delta = 0;
 
     for (var i = 0; i < groups.length; i++) {
-        for (var j = 0; j < groups[i].length; j++) {
-            var box_size = group_dimensions(groups[i][j]);
-            if (box_size[0] + cur_x > MAX_WIDTH) {
-                cur_x = x_0;
-                cur_y += y_delta + PADDING;
-                y_delta = 0;
-            }
-            draw_group(cur_x, cur_y, groups[i][j]);
-            y_delta = Math.max(y_delta, box_size[1]);
-            cur_x += box_size[0] + PADDING;
+        var box_size = group_dimensions(groups[i]);
+        if (box_size[0] + cur_x > MAX_WIDTH) {
+            cur_x = x_0;
+            cur_y += y_delta + PADDING;
+            y_delta = 0;
         }
+        draw_group(cur_x, cur_y, groups[i]);
+        y_delta = Math.max(y_delta, box_size[1]);
+        cur_x += box_size[0] + PADDING;
     }
+    add_event_listeners_matcher(canvas, all_boxes, group_ids);
+}
+
+function add_event_listeners_matcher(canvas, boxes, box_words) {
+    function getMousePos(canvas, evt) {
+        var rect = canvas.getBoundingClientRect();
+        return {
+            x: evt.clientX - rect.left,
+            y: evt.clientY - rect.top
+        };
+    }
+
+    context = canvas.getContext('2d');
+    context.lineWidth = 2;
+    context.strokeStyle = 'black';
+    var detect_box = function (x, y) {
+        var intersect = function(box) {
+            return (x >= box[0])
+                && (x <= box[0] + box[2])
+                && (y >= box[1])
+                && (y <= box[1] + box[3])
+        }
+        for (var i = 0; i < boxes.length; i++) {
+            if (intersect(boxes[i])) {
+                return i;
+            }
+        }
+        return -1;
+    }
+    var set_notification = function(s) {
+        $("#notification").text(s);
+    }
+    var prev_pos = undefined;
+    var prev_box = -1;
+    var listener = function(evt) {
+        var cur_pos = getMousePos(canvas, evt);
+        var cur_box = detect_box(cur_pos.x, cur_pos.y);
+        if (prev_box >= 0 && cur_box >= 0) {
+            context.moveTo(prev_pos.x, prev_pos.y);
+            context.lineTo(cur_pos.x, cur_pos.y);
+            context.stroke();
+            set_notification(box_words[prev_box] + ' -> ' + box_words[cur_box]);
+            Meteor.call(
+                'process_group_annotation',
+                box_words[prev_box],
+                box_words[cur_box],
+                function (err) {
+                    debind();
+                    matcher_refresh();
+                }
+            );
+            prev_pos = undefined;
+            prev_box = -1;
+
+
+        } else if (prev_box >= 0) {
+            return;
+        } else {
+            prev_pos = cur_pos;
+            prev_box = cur_box;
+            cur_box = -1;
+            set_notification(box_words[prev_box]);
+        }
+    };
+    var debind = function() {
+        canvas.removeEventListener("mousedown", listener);
+    }
+    canvas.addEventListener('mousedown', listener, false);
 }
 
 function add_event_listeners(canvas, state) {
@@ -176,6 +270,13 @@ function add_event_listeners(canvas, state) {
             context.moveTo(prev_pos.x, prev_pos.y);
             context.lineTo(cur_pos.x, cur_pos.y);
             context.stroke();
+            Meteor.call(
+                'process_annotation',
+                state.get()['segment'],
+                prev_box,
+                cur_box
+            );
+
             set_notification(box_words[prev_box] + ' -> ' + box_words[cur_box]);
             prev_pos = undefined;
             prev_box = -1;
@@ -195,18 +296,15 @@ function render(state) {
 
     set_canvas();
     context = load_canvas();
-    if (snapshot['mode'] !== 'matcher') {
-        result = render_tokens(context, snapshot['tokens'], tokens);
-        boxes = result[0];
-        box_words = result[1];
-        state.set($.extend(state.get(), {
-            'boxes': boxes,
-            'box_words': box_words,
-        }));
-    } else {
-        console.log('TODO');
-        //render_groups(context, matcher);
-    }
+
+    result = render_tokens(context, snapshot['tokens'], tokens);
+    boxes = result[0];
+    box_words = result[1];
+    state.set($.extend(state.get(), {
+        'boxes': boxes,
+        'box_words': box_words,
+    }));
+
     //} else if (snapshot['mode'] == 'matcher') {
     //    console.log('matcher');
     //    tokens = text_to_entities("BOI");
@@ -234,16 +332,21 @@ Template.annotation_window.events({
     'click button'(event, instance) {
         // increment the counter when button is clicked
         instance.counter.set(instance.counter.get() + 1);
-        tokens = Meteor.call(
-            'get_tokens', instance.state.get()['mode'], instance.state.get()['segment'],
-            function(err, tokens) {
-                instance.state.set($.extend(instance.state.get(), {'tokens': tokens}));
-                render(instance.state);
+        if (instance.state.get()['mode'] === 'matcher') {
+            setInterval(matcher_refresh, 1000);
+            matcher_refresh();
+        } else {
+            tokens = Meteor.call(
+                'get_tokens', instance.state.get()['mode'], instance.state.get()['segment'],
+                function(err, tokens) {
+                    instance.state.set($.extend(instance.state.get(), {'tokens': tokens}));
+                    render(instance.state);
 
-                var canvas = document.getElementById('annotation_canvas');
-                add_event_listeners(canvas, instance.state);
-            }
-        );
+                    var canvas = document.getElementById('annotation_canvas');
+                    add_event_listeners(canvas, instance.state);
+                }
+            );
+        }
     },
 });
 
